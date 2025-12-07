@@ -52,8 +52,6 @@ public class SMTPHandler implements Runnable {
         StringBuilder dataBuffer = new StringBuilder();
 
         while (!quit && (line = in.readLine()) != null) {
-            line = line.trim();
-
             if (inData) {
                 if (line.equals(".")) {
                     String rawMessage = dataBuffer.toString();
@@ -66,7 +64,7 @@ public class SMTPHandler implements Runnable {
                         writeLine(out, "451 Requested action aborted: local error in processing");
                     }
 
-                    // Reset state for the next transaction
+                    // Reset state for the next transaction regardless of storage result
                     mailFrom = null;
                     recipients.clear();
                     dataBuffer = new StringBuilder();
@@ -77,15 +75,17 @@ public class SMTPHandler implements Runnable {
                 continue;
             }
 
-            if (line.toUpperCase().startsWith("HELO")) {
-                writeLine(out, "250 " + serverDomain + " greets " + extractArg(line));
+            String command = line.trim();
+
+            if (command.toUpperCase().startsWith("HELO")) {
+                writeLine(out, "250 " + serverDomain + " greets " + extractArg(command));
                 // Reset any previous transaction state
                 mailFrom = null;
                 recipients.clear();
-            } else if (line.equalsIgnoreCase("MAIL FROM:")) {
+            } else if (command.equalsIgnoreCase("MAIL FROM:")) {
                 writeLine(out, "501 Syntax error in parameters or arguments");
-            } else if (line.toUpperCase().startsWith("MAIL FROM:")) {
-                String email = extractEmailArg(line, "MAIL FROM:");
+            } else if (command.toUpperCase().startsWith("MAIL FROM:")) {
+                String email = extractEmailArg(command, "MAIL FROM:");
                 if (email == null) {
                     writeLine(out, "501 Syntax error in parameters or arguments");
                 } else {
@@ -93,15 +93,15 @@ public class SMTPHandler implements Runnable {
                     recipients.clear();
                     writeLine(out, "250 OK");
                 }
-            } else if (line.equalsIgnoreCase("RCPT TO:")) {
+            } else if (command.equalsIgnoreCase("RCPT TO:")) {
                 writeLine(out, "501 Syntax error in parameters or arguments");
-            } else if (line.toUpperCase().startsWith("RCPT TO:")) {
+            } else if (command.toUpperCase().startsWith("RCPT TO:")) {
                 if (mailFrom == null) {
                     writeLine(out, "503 Bad sequence of commands");
                     continue;
                 }
 
-                String email = extractEmailArg(line, "RCPT TO:");
+                String email = extractEmailArg(command, "RCPT TO:");
                 if (email == null) {
                     writeLine(out, "501 Syntax error in parameters or arguments");
                 } else if (!userManager.isValidUser(email, serverDomain)) {
@@ -110,7 +110,7 @@ public class SMTPHandler implements Runnable {
                     recipients.add(email);
                     writeLine(out, "250 OK");
                 }
-            } else if (line.equalsIgnoreCase("DATA")) {
+            } else if (command.equalsIgnoreCase("DATA")) {
                 if (recipients.isEmpty()) {
                     writeLine(out, "503 Bad sequence of commands");
                 } else {
@@ -118,7 +118,7 @@ public class SMTPHandler implements Runnable {
                     inData = true;
                     dataBuffer = new StringBuilder();
                 }
-            } else if (line.equalsIgnoreCase("QUIT")) {
+            } else if (command.equalsIgnoreCase("QUIT")) {
                 writeLine(out, "221 Bye");
                 quit = true;
             } else {
