@@ -1,6 +1,5 @@
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -167,7 +166,7 @@ public class POP3Handler implements Runnable {
                 writeLine(out, "-ERR No such message");
                 return;
             }
-            long size = messages.get(index - 1).length();
+            long size = mailboxManager.messageSize(messages.get(index - 1));
             writeLine(out, "+OK " + index + " " + size);
         }
     }
@@ -186,14 +185,11 @@ public class POP3Handler implements Runnable {
         }
 
         File msgFile = messages.get(index - 1);
-        long size = msgFile.length();
+        long size = mailboxManager.messageSize(msgFile);
         writeLine(out, "+OK " + size + " octets");
 
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(msgFile)))) {
-            String msgLine;
-            while ((msgLine = br.readLine()) != null) {
-                writeLine(out, msgLine);
-            }
+        for (String msgLine : mailboxManager.readMessageLines(msgFile)) {
+            writeLine(out, msgLine);
         }
         writeLine(out, ".");
     }
@@ -226,7 +222,7 @@ public class POP3Handler implements Runnable {
         if (authenticated) {
             for (int i = 0; i < messages.size(); i++) {
                 if (deletedFlags[i]) {
-                    messages.get(i).delete();
+                    mailboxManager.deleteMessage(messages.get(i));
                 }
             }
         }
@@ -258,13 +254,7 @@ public class POP3Handler implements Runnable {
     }
 
     private void loadMessages() {
-        File userDir = new File("storage", currentUser);
-        File[] files = userDir.listFiles((file) -> file.isFile());
-        if (files == null) {
-            files = new File[0];
-        }
-        Arrays.sort(files);
-        messages = new ArrayList<>(Arrays.asList(files));
+        messages = mailboxManager.listMessages(currentUser);
         deletedFlags = new boolean[messages.size()];
     }
 }
