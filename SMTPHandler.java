@@ -27,29 +27,37 @@ public class SMTPHandler implements Runnable {
 
     @Override
     public void run() {
+        OutputStream out = null;
         try {
-            handleSession();
+            out = client.getOutputStream();
+            handleSession(out);
+        } catch (IOException e) {
+            // 421 Service not available, closing transmission channel
+            if (out != null) {
+                try {
+                    writeLine(out, "421 " + serverDomain
+                            + " Service not available, closing transmission channel");
+                } catch (IOException ignored) {
+                }
+            }
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
             try {
                 client.close();
-            } catch (IOException ignored) {
-            }
+            } catch (IOException ignored) {}
         }
     }
 
-    private void handleSession() throws IOException {
+    private void handleSession(OutputStream out) throws IOException {
         BufferedReader in = new BufferedReader(
                 new InputStreamReader(client.getInputStream()));
-        OutputStream out = client.getOutputStream();
 
-        // Initial greeting
+        // Greeting (220)
         writeLine(out, "220 " + serverDomain + " Service ready");
 
         String line;
         boolean quit = false;
-        boolean heloSeen = false;
         String mailFrom = null;
         List<String> recipients = new ArrayList<>();
         boolean inData = false;
@@ -57,11 +65,12 @@ public class SMTPHandler implements Runnable {
 
         while (!quit && (line = in.readLine()) != null) {
             if (inData) {
-                // DATA mode: accumulate message until single dot on its own line
+                // DATA mode: collect message until a single dot line
                 if (line.equals(".")) {
                     String rawMessage = dataBuffer.toString();
                     try {
                         if (mailFrom == null || recipients.isEmpty()) {
+                            // Should not normally happen if we enforce sequences
                             writeLine(out, "451 Requested action aborted: local error in processing");
                         } else {
                             deliverMessage(mailFrom, recipients, rawMessage);
@@ -71,7 +80,7 @@ public class SMTPHandler implements Runnable {
                         writeLine(out, "451 Requested action aborted: local error in processing");
                     }
 
-                    // Reset state for the next transaction
+                    // Reset transaction state
                     mailFrom = null;
                     recipients.clear();
                     dataBuffer = new StringBuilder();
@@ -90,18 +99,17 @@ public class SMTPHandler implements Runnable {
                 if (arg.isEmpty()) {
                     writeLine(out, "501 Syntax error in parameters or arguments");
                 } else {
-                    heloSeen = true;
-                    // Reset any previous transaction state
+                    writeLine(out, "250 " + serverDomain + " greets " + arg);
+                    // Reset transaction on new HELO
                     mailFrom = null;
                     recipients.clear();
-                    writeLine(out, "250 " + serverDomain + " greets " + arg);
-                }
-            } else if (upper.startsWith("MAIL FROM:")) {
-                if (!heloSeen) {
-                    writeLine(out, "503 Bad sequence of commands");
-                    continue;
                 }
 
+            } else if (upper.equals("MAIL FROM:")) {
+                // Explicit empty argument
+                writeLine(out, "501 Syntax error in parameters or arguments");
+
+            } else if (upper.startsWith("MAIL FROM:")) {
                 String email = extractEmailArg(command, "MAIL FROM:");
                 if (email == null) {
                     writeLine(out, "501 Syntax error in parameters or arguments");
@@ -110,49 +118,56 @@ public class SMTPHandler implements Runnable {
                     recipients.clear();
                     writeLine(out, "250 OK");
                 }
-            } else if (upper.equals("MAIL FROM:")) {
-                // Explicit empty argument
+
+            } else if (upper.equals("RCPT TO:")) {
                 writeLine(out, "501 Syntax error in parameters or arguments");
+
             } else if (upper.startsWith("RCPT TO:")) {
-                if (!heloSeen || mailFrom == null) {
+                if (mailFrom == null) {
                     writeLine(out, "503 Bad sequence of commands");
                     continue;
                 }
 
                 String email = extractEmailArg(command, "RCPT TO:");
                 if (email == null) {
-                    writeLine(out, "501 Syntax error in parameters or arguments");
-                } else {
-                    String domain = getDomainPart(email);
-                    if (domain == null) {
-                        writeLine(out, "501 Syntax error in parameters or arguments");
-                    } else if (domain.equalsIgnoreCase(serverDomain)) {
-                        // Local recipient: must be a valid local user
-                        if (!userManager.isValidUser(email, serverDomain)) {
-                            writeLine(out, "550 Requested action not taken: mailbox unavailable");
-                        } else {
-                            recipients.add(email);
-                            writeLine(out, "250 OK");
-                        }
+                    // syntactically bad mailbox
+                    writeLine(out, "553 Requested action not taken: mailbox name not allowed");
+                    continue;
+                }
+
+                String domain = getDomainPart(email);
+                if (domain == null) {
+                    writeLine(out, "553 Requested action not taken: mailbox name not allowed");
+                    continue;
+                }
+
+                if (domain.equalsIgnoreCase(serverDomain)) {
+                    // Local user: must exist
+                    if (!userManager.isValidUser(email, serverDomain)) {
+                        writeLine(out, "550 Requested action not taken: mailbox unavailable");
                     } else {
-                        // Remote recipient: accept, will be forwarded using SMTP and DNS
                         recipients.add(email);
                         writeLine(out, "250 OK");
                     }
+                } else {
+                    // Remote domain: accept and later forward via DNS/MX and SMTP
+                    recipients.add(email);
+                    writeLine(out, "250 OK");
                 }
-            } else if (upper.equals("RCPT TO:")) {
-                writeLine(out, "501 Syntax error in parameters or arguments");
+
             } else if (upper.equals("DATA")) {
-                if (!heloSeen || mailFrom == null || recipients.isEmpty()) {
+                if (recipients.isEmpty() || mailFrom == null) {
                     writeLine(out, "503 Bad sequence of commands");
                 } else {
                     writeLine(out, "354 Start mail input; end with <CRLF>.<CRLF>");
                     inData = true;
                     dataBuffer = new StringBuilder();
                 }
+
             } else if (upper.equals("QUIT")) {
                 writeLine(out, "221 Bye");
                 quit = true;
+
             } else {
                 // Unknown or unsupported command
                 writeLine(out, "501 Syntax error in parameters or arguments");
@@ -160,8 +175,13 @@ public class SMTPHandler implements Runnable {
         }
     }
 
-    private void deliverMessage(String mailFrom, List<String> recipients, String rawMessage) throws IOException {
-        // Separate local and remote recipients by domain
+    /**
+     * Deliver a message to local users and forward to remote domains via SMTP/DNS.
+     */
+    private void deliverMessage(String mailFrom,
+                                List<String> recipients,
+                                String rawMessage) throws IOException {
+
         List<String> localRecipients = new ArrayList<>();
         Map<String, List<String>> remoteByDomain = new HashMap<>();
 
@@ -171,7 +191,6 @@ public class SMTPHandler implements Runnable {
                 continue;
             }
             if (domain.equalsIgnoreCase(serverDomain)) {
-                // Local recipient (we assume it was validated at RCPT time)
                 localRecipients.add(rcpt);
             } else {
                 List<String> list = remoteByDomain.get(domain);
@@ -183,26 +202,31 @@ public class SMTPHandler implements Runnable {
             }
         }
 
-        // Store local copies
-        for (String local : localRecipients) {
-            mailboxManager.storeLocalMessage(local, rawMessage);
+        // Local delivery
+        for (String rcpt : localRecipients) {
+            mailboxManager.storeLocalMessage(rcpt, rawMessage);
         }
 
-        // Forward to remote domains (one SMTP relay per domain)
+        // Remote delivery: one SMTP session per domain
         for (Map.Entry<String, List<String>> entry : remoteByDomain.entrySet()) {
             String domain = entry.getKey();
-            List<String> domainRecipients = entry.getValue();
-            sendToRemoteDomain(mailFrom, domain, domainRecipients, rawMessage);
+            List<String> rcptsForDomain = entry.getValue();
+            sendToRemoteDomain(mailFrom, domain, rcptsForDomain, rawMessage);
         }
     }
 
+    /**
+     * Open an SMTP connection to the remote mail server for the given domain,
+     * using DNS MX via `dig +short <domain> MX`, and forward the message.
+     */
     private void sendToRemoteDomain(String mailFrom,
                                     String domain,
                                     List<String> domainRecipients,
                                     String message) throws IOException {
+
         String mxHost = lookupMxHost(domain);
         if (mxHost == null) {
-            throw new IOException("No MX host for domain " + domain);
+            throw new IOException("No MX host found for domain " + domain);
         }
 
         Socket smtpSocket = new Socket(mxHost, 25);
@@ -231,7 +255,7 @@ public class SMTPHandler implements Runnable {
                 throw new IOException("MAIL FROM rejected by " + mxHost + ": " + resp);
             }
 
-            // RCPT TO for each recipient of this domain
+            // RCPT TO for each recipient in this domain
             for (String rcpt : domainRecipients) {
                 writeRemoteLine(out, "RCPT TO:<" + rcpt + ">");
                 resp = in.readLine();
@@ -243,11 +267,11 @@ public class SMTPHandler implements Runnable {
             // DATA
             writeRemoteLine(out, "DATA");
             resp = in.readLine();
-            if (resp == null || (!resp.startsWith("3"))) {
+            if (resp == null || resp.length() == 0 || resp.charAt(0) != '3') {
                 throw new IOException("DATA rejected by " + mxHost + ": " + resp);
             }
 
-            // Send message body as received, then terminator line
+            // Send message body as-is, then terminator line
             out.write(message.getBytes());
             if (!message.endsWith("\r\n")) {
                 out.write("\r\n".getBytes());
@@ -262,27 +286,32 @@ public class SMTPHandler implements Runnable {
 
             // QUIT
             writeRemoteLine(out, "QUIT");
-            // Ignore final response
+            // Read and ignore final response
             in.readLine();
+
         } finally {
             try {
                 smtpSocket.close();
-            } catch (IOException ignored) {
-            }
+            } catch (IOException ignored) {}
         }
     }
 
+    /**
+     * Use `dig +short <domain> MX` to find an MX host.
+     * Returns the first host found, or null if none.
+     */
     private String lookupMxHost(String domain) throws IOException {
         Process process = new ProcessBuilder("dig", "+short", domain, "MX").start();
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getInputStream()))) {
+
             String line;
             while ((line = reader.readLine()) != null) {
                 line = line.trim();
                 if (line.isEmpty()) {
                     continue;
                 }
-                // Typical output: "10 mail.uliege.be."
+                // Typical line: "10 mail.example.com."
                 String[] parts = line.split("\\s+");
                 if (parts.length >= 2) {
                     String host = parts[parts.length - 1];
@@ -294,8 +323,6 @@ public class SMTPHandler implements Runnable {
                     }
                 }
             }
-        } catch (IOException e) {
-            throw e;
         }
         return null;
     }
@@ -312,9 +339,7 @@ public class SMTPHandler implements Runnable {
 
     private String extractArg(String line) {
         int space = line.indexOf(' ');
-        if (space == -1) {
-            return "";
-        }
+        if (space == -1) return "";
         return line.substring(space + 1).trim();
     }
 
