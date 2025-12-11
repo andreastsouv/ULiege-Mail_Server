@@ -34,7 +34,7 @@ public class IMAPHandler implements Runnable {
 
     private void handleSession() throws IOException {
         OutputStream out = client.getOutputStream();
-        // Minimal IMAP greeting; you’ll later implement CAPABILITY/LOGIN/etc.
+        // Minimal IMAP greeting; Later implement CAPABILITY/LOGIN/etc.
         writeLine(out, "* OK IMAP server ready (" + serverDomain + ")");
         // For now, immediately close with a fake tag
         writeLine(out, "A1 OK LOGOUT completed");
