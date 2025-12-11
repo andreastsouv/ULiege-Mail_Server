@@ -7,14 +7,12 @@ import java.util.concurrent.Executors;
 public class MailServer {
 
     private final String domain;
-    private final int maxThreads;
     private final ExecutorService threadPool;
     private final MailboxManager mailboxManager;
     private final UserManager userManager;
 
     public MailServer(String domain, int maxThreads) {
         this.domain = domain;
-        this.maxThreads = maxThreads;
         this.threadPool = Executors.newFixedThreadPool(maxThreads);
         this.mailboxManager = new MailboxManager();
         this.userManager = new UserManager();
