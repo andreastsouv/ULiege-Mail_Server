@@ -21,12 +21,12 @@ public class MailServer {
     }
 
     public void start() throws IOException {
-        // Ports: SMTP 25, POP3 110, IMAP 143 (from statement/slides)
+        // Ports: SMTP 25, POP3 110, IMAP 143
         ServerSocket smtpServer = new ServerSocket(25);
         ServerSocket pop3Server = new ServerSocket(110);
         ServerSocket imapServer = new ServerSocket(143);
 
-        // You can put each accept loop in its own thread
+        // Accept loops for each protocol
         startAcceptLoop(smtpServer, "SMTP");
         startAcceptLoop(pop3Server, "POP3");
         startAcceptLoop(imapServer, "IMAP");
@@ -39,9 +39,9 @@ public class MailServer {
                     Socket client = serverSocket.accept();
                     // Dispatch to correct handler
                     Runnable worker = createWorkerForProtocol(protocolName, client);
-                    threadPool.execute(worker); // Uses thread pool as recommended
+                    threadPool.execute(worker); // limited thread pool
                 } catch (IOException e) {
-                    e.printStackTrace(); // You will refine this later
+                    e.printStackTrace(); // TO DO: refine this later
                 }
             }
         });
