@@ -41,7 +41,7 @@ public class MailServer {
                     Runnable worker = createWorkerForProtocol(protocolName, client);
                     threadPool.execute(worker); // limited thread pool
                 } catch (IOException e) {
-                    e.printStackTrace(); // TO DO: refine this later
+                    e.printStackTrace();
                 }
             }
         });
